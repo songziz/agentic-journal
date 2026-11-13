@@ -1,0 +1,28 @@
+# Virtual environments and bytecode
+.venv/
+.adk/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.sa.json
+*credentials*.json
+*.pem
+*.key
+
+# Local project docs / session state
+project_requirements.md
+*.db
+*.sqlite*
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
