@@ -8,11 +8,12 @@ from typing import Final
 
 from google.cloud import firestore, storage
 
-from journal_agent import models
+from journal_agent import models, secrets
 
 _USERS_COLLECTION: Final[str] = "users"
 _ENTRIES_SUBCOLLECTION: Final[str] = "journal_entries"
 _STATE_SUBCOLLECTION: Final[str] = "state_summaries"
+_SESSIONS_SUBCOLLECTION: Final[str] = "sessions"
 _LATEST_STATE_DOC_ID: Final[str] = "latest"
 _DEFAULT_FIRESTORE_DB: Final[str] = "(default)"
 
@@ -34,7 +35,9 @@ def get_firestore_client(
     """
     resolved_project = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
     resolved_db = (
-        database or os.environ.get("FIRESTORE_DATABASE") or _DEFAULT_FIRESTORE_DB
+        database
+        or os.environ.get("FIRESTORE_DATABASE")
+        or _DEFAULT_FIRESTORE_DB
     )
     return firestore.Client(project=resolved_project, database=resolved_db)
 
@@ -241,6 +244,65 @@ def get_latest_user_state_summary(
     return models.UserStateSummary.model_validate(data)
 
 
+def save_session_checkpoint(
+    checkpoint: models.SessionCheckpoint,
+    db_client: firestore.Client | None = None,
+) -> models.SessionCheckpoint:
+    """Persists a conversational session state checkpoint to Cloud Firestore.
+
+    Args:
+        checkpoint: Validated SessionCheckpoint model to store under
+            users/{user_id}/sessions/{session_id}.
+        db_client: Optional pre-initialized Firestore client. If None, creates a
+            default client.
+
+    Returns:
+        The stored SessionCheckpoint instance.
+    """
+    client = db_client if db_client is not None else get_firestore_client()
+    doc_ref = (
+        client.collection(_USERS_COLLECTION)
+        .document(checkpoint.user_id)
+        .collection(_SESSIONS_SUBCOLLECTION)
+        .document(checkpoint.session_id)
+    )
+    doc_ref.set(checkpoint.model_dump())
+    return checkpoint
+
+
+def get_session_checkpoint(
+    user_id: str,
+    session_id: str,
+    db_client: firestore.Client | None = None,
+) -> models.SessionCheckpoint | None:
+    """Retrieves a persisted session checkpoint from Cloud Firestore.
+
+    Args:
+        user_id: Identifier of the user.
+        session_id: Unique session identifier.
+        db_client: Optional pre-initialized Firestore client. If None, creates a
+            default client.
+
+    Returns:
+        The stored SessionCheckpoint, or None if no checkpoint exists for the
+        given user_id and session_id.
+    """
+    client = db_client if db_client is not None else get_firestore_client()
+    snapshot = (
+        client.collection(_USERS_COLLECTION)
+        .document(user_id.strip())
+        .collection(_SESSIONS_SUBCOLLECTION)
+        .document(session_id.strip())
+        .get()
+    )
+    if not snapshot.exists:
+        return None
+    data = snapshot.to_dict()
+    if not data:
+        return None
+    return models.SessionCheckpoint.model_validate(data)
+
+
 def format_medical_report_markdown(report: models.MedicalReviewReport) -> str:
     """Formats a MedicalReviewReport into a readable Markdown document.
 
@@ -251,9 +313,12 @@ def format_medical_report_markdown(report: models.MedicalReviewReport) -> str:
         Formatted Markdown string suitable for clinician review.
     """
     summary = report.state_summary
-    recommendations_lines = "\n".join(f"- {item}" for item in summary.recommendations)
+    recommendations_lines = "\n".join(
+        f"- {item}" for item in summary.recommendations
+    )
     excerpts_lines = "\n\n".join(
-        f"### Entry `{entry.entry_id}` ({entry.created_at})\n> {entry.raw_text}"
+        f"### Entry `{entry.entry_id}` ({entry.created_at})\n"
+        f"> {entry.raw_text}"
         for entry in report.recent_entries
     )
     focus_section = (
@@ -295,7 +360,7 @@ def upload_medical_report_to_gcs(
     Args:
         report: Validated MedicalReviewReport to upload.
         bucket_name: Target GCS bucket name. If None, resolves from
-            MEDICAL_EXPORT_GCS_BUCKET.
+            MEDICAL_EXPORT_GCS_BUCKET or Google Cloud Secret Manager.
         gcs_client: Optional pre-initialized Cloud Storage client. If None,
             creates a default client.
 
@@ -304,21 +369,23 @@ def upload_medical_report_to_gcs(
 
     Raises:
         ValueError: If no GCS bucket name is provided or configured in
-            MEDICAL_EXPORT_GCS_BUCKET.
+            MEDICAL_EXPORT_GCS_BUCKET or Secret Manager.
     """
-    resolved_bucket = (
-        bucket_name or os.environ.get("MEDICAL_EXPORT_GCS_BUCKET", "").strip()
+    resolved_bucket = secrets.resolve_export_bucket_name(
+        explicit_bucket=bucket_name
     )
     if not resolved_bucket:
         raise ValueError(
-            "MEDICAL_EXPORT_GCS_BUCKET is not set. Configure a Cloud Storage "
-            "bucket name before exporting a medical review report."
+            "MEDICAL_EXPORT_GCS_BUCKET is not set and could not be resolved "
+            "from Secret Manager. Configure a Cloud Storage bucket name before "
+            "exporting a medical review report."
         )
 
     client = gcs_client if gcs_client is not None else get_storage_client()
     bucket = client.bucket(resolved_bucket)
     object_path = (
-        f"medical_exports/{report.user_id}/{report.generated_at}_{report.report_id}.md"
+        f"medical_exports/{report.user_id}/"
+        f"{report.generated_at}_{report.report_id}.md"
     )
     blob = bucket.blob(object_path)
     markdown_body = format_medical_report_markdown(report)

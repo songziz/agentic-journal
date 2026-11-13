@@ -19,6 +19,12 @@ project_requirements.md
 *.db
 *.sqlite*
 
+# Terraform local state and variable files
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
 # Tool caches
 .mypy_cache/
 .pytest_cache/
